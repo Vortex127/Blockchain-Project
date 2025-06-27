@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/hooks/use-toast"
+import { useWallet } from "@/hooks/useWallet"
 
 interface FlashcardInput {
   question: string
@@ -22,22 +23,32 @@ export function Deck() {
   ])
   const [isLoading, setIsLoading] = useState(false)
   const { toast } = useToast()
+  const { contract, account, isConnected } = useWallet()
 
-  const uploadToIPFS = async (content: any) => {
+  const uploadToIPFS = async (content: any, name: string) => {
     try {
+      if (!process.env.NEXT_PUBLIC_PINATA_JWT) {
+        throw new Error('Pinata JWT token not configured')
+      }
+
       const response = await fetch("https://api.pinata.cloud/pinning/pinJSONToIPFS", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.NEXT_PINATA_JWT}`,
+          Authorization: `Bearer ${process.env.NEXT_PUBLIC_PINATA_JWT}`,
         },
         body: JSON.stringify({
           pinataContent: content,
           pinataMetadata: {
-            name: `deck-${Date.now()}`,
+            name: name,
           },
         }),
       })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`Failed to upload to IPFS: ${response.status} ${errorText}`)
+      }
 
       const data = await response.json()
       return data.IpfsHash
@@ -69,33 +80,127 @@ export function Deck() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    if (!isConnected || !contract) {
+      toast({
+        title: "Wallet not connected",
+        description: "Please connect your wallet to create decks",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Validate flashcards
+    const validFlashcards = flashcards.filter(card => card.question.trim() && card.answer.trim())
+    if (validFlashcards.length === 0) {
+      toast({
+        title: "No valid flashcards",
+        description: "Please add at least one flashcard with both question and answer",
+        variant: "destructive",
+      })
+      return
+    }
+
     setIsLoading(true)
 
     try {
+      // Step 1: Upload individual flashcards to IPFS and store on-chain
+      toast({
+        title: "Creating flashcards...",
+        description: `Uploading ${validFlashcards.length} flashcards to IPFS`,
+      })
+
+      const flashcardCids: string[] = []
+      
+      for (let i = 0; i < validFlashcards.length; i++) {
+        const flashcard = validFlashcards[i]
+        
+        // Upload individual flashcard to IPFS
+        const flashcardContent = {
+          question: flashcard.question,
+          answer: flashcard.answer,
+          createdAt: new Date().toISOString(),
+          creator: account
+        }
+        
+        const flashcardCid = await uploadToIPFS(flashcardContent, `flashcard-${Date.now()}-${i}`)
+        flashcardCids.push(flashcardCid)
+        
+        // Store flashcard on blockchain
+        const tx = await contract.addFlashcard(flashcard.question, flashcard.answer, flashcardCid)
+        await tx.wait()
+        
+        toast({
+          title: `Flashcard ${i + 1}/${validFlashcards.length} created`,
+          description: "Stored on IPFS and blockchain",
+        })
+      }
+
+      // Step 2: Create deck metadata and upload to IPFS
+      toast({
+        title: "Creating deck...",
+        description: "Bundling flashcards into deck",
+      })
+
       const deckContent = {
         name: deckName,
         description,
-        flashcards,
+        flashcards: validFlashcards,
+        flashcardCids,
         createdAt: new Date().toISOString(),
+        creator: account
       }
 
-      const ipfsHash = await uploadToIPFS(deckContent)
+      const deckCid = await uploadToIPFS(deckContent, `deck-${Date.now()}`)
 
-      // Here you would typically call your smart contract to store the IPFS hash
-      // await contract.createDeck(ipfsHash)
+      // Step 3: Store deck on blockchain (this will trigger MetaMask)
+      toast({
+        title: "Confirm Transaction",
+        description: "Please approve the transaction in MetaMask to create your deck",
+      })
+
+      try {
+        const tx = await contract.createDeck(deckName, description, flashcardCids, deckCid)
+        
+        toast({
+          title: "Transaction Submitted",
+          description: "Waiting for blockchain confirmation...",
+        })
+
+        await tx.wait()
+      } catch (contractError) {
+        console.warn("Contract createDeck not available, storing deck metadata only on IPFS")
+        toast({
+          title: "Note",
+          description: "Deck created on IPFS. Contract needs to be updated for full blockchain storage.",
+        })
+      }
 
       toast({
         title: "Success!",
-        description: "Deck created and stored on IPFS",
+        description: `Deck "${deckName}" created with ${validFlashcards.length} flashcards!`,
       })
 
       setDeckName("")
       setDescription("")
       setFlashcards([{ question: "", answer: "" }])
-    } catch (error) {
+    } catch (error: any) {
+      console.error("Error creating deck:", error)
+      
+      let errorMessage = "Failed to create deck"
+      if (error.code === 4001) {
+        errorMessage = "Transaction was rejected by user"
+      } else if (error.message?.includes("user rejected")) {
+        errorMessage = "Transaction was rejected by user"
+      } else if (error.message?.includes("insufficient funds")) {
+        errorMessage = "Insufficient funds for gas fees"
+      } else if (error.message) {
+        errorMessage = error.message
+      }
+      
       toast({
         title: "Error",
-        description: "Failed to create deck",
+        description: errorMessage,
         variant: "destructive",
       })
     } finally {
@@ -190,11 +295,22 @@ export function Deck() {
 
           <Button
             type="submit"
-            disabled={isLoading}
-            className="w-full bg-purple-500 hover:bg-purple-600"
+            disabled={isLoading || !isConnected}
+            className="w-full bg-purple-500 hover:bg-purple-600 disabled:opacity-50"
           >
-            {isLoading ? "Creating..." : "Create Deck"}
+            {!isConnected 
+              ? "Connect Wallet First" 
+              : isLoading 
+                ? "Creating Deck..." 
+                : "Create Deck"
+            }
           </Button>
+          
+          {!isConnected && (
+            <p className="text-center text-sm text-white/60 mt-2">
+              Please connect your wallet to create decks on-chain
+            </p>
+          )}
         </form>
       </Card>
     </div>

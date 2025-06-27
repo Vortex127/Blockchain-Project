@@ -8,6 +8,15 @@ interface Flashcard {
   ipfsCid: string;
 }
 
+interface Deck {
+  name: string;
+  description: string;
+  owner: string;
+  timestamp: bigint;
+  flashcardCids: string[];
+  deckCid: string;
+}
+
 export type FlashcardVaultContract = BaseContract & {
   addFlashcard: (
     question: string,
@@ -19,10 +28,22 @@ export type FlashcardVaultContract = BaseContract & {
     name: string,
     description: string,
     flashcardCids: string[],
-    cid: string
+    deckCid: string
   ) => Promise<ContractTransactionResponse>
 
   getFlashcardsByOwner: (
     owner: string
   ) => Promise<Flashcard[]>
+
+  getDecksByOwner: (
+    owner: string
+  ) => Promise<Deck[]>
+
+  getFlashcardCount: (
+    owner: string
+  ) => Promise<bigint>
+
+  getDeckCount: (
+    owner: string
+  ) => Promise<bigint>
 }

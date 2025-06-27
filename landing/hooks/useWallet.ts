@@ -6,6 +6,7 @@ import FlashcardVaultArtifact from "../../blockchin/artifacts/contracts/Flashcar
 export interface WalletState {
   account: string
   isConnected: boolean
+  isLoading: boolean
   provider: ethers.BrowserProvider | null
   signer: ethers.JsonRpcSigner | null
   contract: FlashcardVaultContract | null
@@ -15,6 +16,7 @@ export const useWallet = () => {
   const [walletState, setWalletState] = useState<WalletState>({
     account: '',
     isConnected: false,
+    isLoading: true,
     provider: null,
     signer: null,
     contract: null,
@@ -33,6 +35,8 @@ export const useWallet = () => {
 
   const connectWallet = useCallback(async () => {
     try {
+      setWalletState(prev => ({ ...prev, isLoading: true }))
+      
       if (!window.ethereum) {
         throw new Error('Please install MetaMask to use this application!')
       }
@@ -46,6 +50,7 @@ export const useWallet = () => {
       const newState = {
         account: address,
         isConnected: true,
+        isLoading: false,
         provider,
         signer,
         contract,
@@ -57,6 +62,7 @@ export const useWallet = () => {
       return true
     } catch (err) {
       console.error('Error connecting wallet:', err)
+      setWalletState(prev => ({ ...prev, isLoading: false }))
       return false
     }
   }, [])
@@ -65,6 +71,7 @@ export const useWallet = () => {
     setWalletState({
       account: '',
       isConnected: false,
+      isLoading: false,
       provider: null,
       signer: null,
       contract: null,
@@ -75,18 +82,37 @@ export const useWallet = () => {
   // Auto-connect if previously connected
   useEffect(() => {
     const autoConnect = async () => {
+      // Always set loading to false if no localStorage flag
+      if (!localStorage.getItem('walletConnected')) {
+        setWalletState(prev => ({ ...prev, isLoading: false }))
+        return
+      }
+
       if (window.ethereum && localStorage.getItem('walletConnected') === 'true') {
         try {
-          await connectWallet()
+          // Check if already connected to avoid unnecessary state changes
+          const accounts = await window.ethereum.request({ method: 'eth_accounts' })
+          if (accounts.length > 0 && !walletState.isConnected) {
+            await connectWallet()
+          } else {
+            // Set loading to false if no accounts or already connected
+            setWalletState(prev => ({ ...prev, isLoading: false }))
+          }
         } catch (error) {
           console.error('Failed to auto-connect wallet:', error)
           localStorage.removeItem('walletConnected')
+          setWalletState(prev => ({ ...prev, isLoading: false }))
         }
+      } else {
+        // Set loading to false if no ethereum or no connection flag
+        setWalletState(prev => ({ ...prev, isLoading: false }))
       }
     }
 
-    autoConnect()
-  }, [connectWallet])
+    // Small delay to ensure DOM is ready
+    const timer = setTimeout(autoConnect, 100)
+    return () => clearTimeout(timer)
+  }, [connectWallet, walletState.isConnected])
 
   // Handle account changes
   useEffect(() => {
